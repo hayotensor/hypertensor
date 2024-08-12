@@ -19,37 +19,42 @@ use sp_runtime::traits::TrailingZeroInput;
 impl<T: Config> Pallet<T> {
   pub fn try_propose_dishonesty(
     proposer: T::AccountId,
-    model_id: u32,
+    subnet_id: u32,
     peer_id: PeerId,
     proposal_type: PropsType,
     data: Vec<u8>,
-    account_data_id: u32,
+    accountant_data_id: Option<u32>,
   ) -> DispatchResult {
     ensure!(
       proposal_type != PropsType::None,
       Error::<T>::PropsTypeInvalid
     );
 
-    // --- Ensure model exists
     ensure!(
-      ModelsData::<T>::contains_key(model_id.clone()),
-      Error::<T>::ModelNotExist
+      data.len() > 0,
+      Error::<T>::DataEmpty
+    );
+
+    // --- Ensure subnet exists
+    ensure!(
+      SubnetsData::<T>::contains_key(subnet_id.clone()),
+      Error::<T>::SubnetNotExist
     );
 
     // --- Ensure account has peer
     ensure!(
-      ModelPeersData::<T>::contains_key(model_id.clone(), proposer.clone()),
-      Error::<T>::ModelPeerNotExist
+      SubnetNodesData::<T>::contains_key(subnet_id.clone(), proposer.clone()),
+      Error::<T>::SubnetNodeNotExist
     );
     
     // --- Ensure peer to propose as dishonest exists
-    let model_peer_account: (bool, T::AccountId) = match ModelPeerAccount::<T>::try_get(model_id.clone(), peer_id.clone()) {
+    let subnet_node_account: (bool, T::AccountId) = match SubnetNodeAccount::<T>::try_get(subnet_id.clone(), peer_id.clone()) {
       Ok(_result) => (true, _result),
       Err(()) => (false, T::AccountId::decode(&mut TrailingZeroInput::zeroes()).unwrap()),
     };
 
     ensure!(
-      model_peer_account.clone().0,
+      subnet_node_account.clone().0,
       Error::<T>::PeerIdNotExist
     );
 
@@ -86,8 +91,8 @@ impl<T: Config> Pallet<T> {
     //     proposal type
     ensure!(
       !Self::account_has_active_proposal(
-        model_id.clone(), 
-        model_peer_account.clone().1, 
+        subnet_id.clone(), 
+        subnet_node_account.clone().1, 
         proposal_type.clone(),
         block,
       ),
@@ -99,12 +104,17 @@ impl<T: Config> Pallet<T> {
     if proposal_type == PropsType::DishonestAccountant {
       // --- Ensure AccountantData exists
       ensure!(
-        AccountantData::<T>::contains_key(model_id.clone(), account_data_id),
+        accountant_data_id != None,
+        Error::<T>::InvalidAccountantDataId
+      );
+
+      ensure!(
+        AccountantData::<T>::contains_key(subnet_id.clone(), accountant_data_id.unwrap()),
         Error::<T>::InvalidAccountantDataId
       );
 
       // --- Ensure required time period to challenge hasn't passed
-      let accountant_data: AccountantDataParams<T::AccountId> = AccountantData::<T>::get(model_id.clone(), account_data_id);
+      let accountant_data: AccountantDataParams<T::AccountId> = AccountantData::<T>::get(subnet_id.clone(), accountant_data_id.unwrap());
       let accountant_data_block: u64 = accountant_data.block;
       let accountant_data_challenge_period: u64 = AccountantDataChallengePeriod::<T>::get();
       let accountant_data_max_block: u64 = accountant_data_block + accountant_data_challenge_period;
@@ -118,10 +128,10 @@ impl<T: Config> Pallet<T> {
     let mut voters: Vec<T::AccountId> = Vec::new();
     voters.push(proposer.clone());
 
-    let min_required_peer_accountant_epochs: u64 = MinRequiredPeerAccountantEpochs::<T>::get();
+    let min_required_peer_accountant_epochs: u64 = MinRequiredNodeAccountantEpochs::<T>::get();
     let epoch_length: u64 = EpochLength::<T>::get();
     let total_accountants = Self::get_total_accountants(
-      model_id.clone(),
+      subnet_id.clone(),
       block,
       epoch_length,
       min_required_peer_accountant_epochs
@@ -129,17 +139,16 @@ impl<T: Config> Pallet<T> {
 
     // --- Initiate proposal
     DishonestyProposal::<T>::mutate(
-      model_id.clone(),
+      subnet_id.clone(),
       proposal_index,
       |params: &mut DishonestyProposalParams<T::AccountId>| {
-        params.model_id = model_id.clone();
+        params.subnet_id = subnet_id.clone();
         params.proposal_type = proposal_type.clone();
         params.proposer = proposer.clone();
         params.total_accountants = total_accountants;
-        params.account_id = model_peer_account.clone().1;
+        params.account_id = subnet_node_account.clone().1;
         params.peer_id = peer_id.clone();
         params.bid = proposal_bid_amout;
-        // params.challenged = false;
         params.total_votes = 1;
         params.votes = VotesParams {
           yay: 1,
@@ -152,9 +161,9 @@ impl<T: Config> Pallet<T> {
         params.challenge_block = 0;
         params.data = data;
         if proposal_type == PropsType::DishonestAccountant {
-          params.accountant_data_id = account_data_id;
+          params.accountant_data_id = Some(accountant_data_id.unwrap());
         } else {
-          params.accountant_data_id = 0;
+          params.accountant_data_id = None;
         }
       }
     );
@@ -167,18 +176,18 @@ impl<T: Config> Pallet<T> {
 
   pub fn try_challenge_dishonesty(
     account_id: T::AccountId, 
-    model_id: u32,
+    subnet_id: u32,
     proposal_index: u32,
   ) -> DispatchResult {
     ensure!(
-      DishonestyProposal::<T>::contains_key(model_id, proposal_index),
+      DishonestyProposal::<T>::contains_key(subnet_id, proposal_index),
       Error::<T>::ProposalNotExist
     );
 
-    // --- We don't check if model ID or peer ID exists because a proposal
+    // --- We don't check if subnet ID or peer ID exists because a proposal
     //     can't exist unless they do
 
-    let proposal = DishonestyProposal::<T>::get(model_id, proposal_index);
+    let proposal = DishonestyProposal::<T>::get(subnet_id, proposal_index);
     let dishonest_account_id: T::AccountId = proposal.account_id;
 
     // --- Ensure account is the possible challenger
@@ -228,11 +237,10 @@ impl<T: Config> Pallet<T> {
 
     // --- Challenge proposal
     DishonestyProposal::<T>::mutate(
-      model_id.clone(),
+      subnet_id.clone(),
       proposal_index,
       |params: &mut DishonestyProposalParams<T::AccountId>| {
         params.total_votes += 1;
-        // params.challenged = true;
         params.challenge_block = block;
         params.votes.nay += 1; // challenger automatically nays proposal
         params.voters.push(account_id.clone());
@@ -245,29 +253,29 @@ impl<T: Config> Pallet<T> {
 
   pub fn try_vote(
     account_id: T::AccountId, 
-    model_id: u32,
+    subnet_id: u32,
     proposal_index: u32,
     vote: VoteType
   ) -> DispatchResult {
     ensure!(
-      DishonestyProposal::<T>::contains_key(model_id, proposal_index),
+      DishonestyProposal::<T>::contains_key(subnet_id, proposal_index),
       Error::<T>::ProposalNotExist
     );
 
-    let proposal = DishonestyProposal::<T>::get(model_id, proposal_index);
+    let proposal = DishonestyProposal::<T>::get(subnet_id, proposal_index);
 
     // --- Ensure dishonest peer still exists 
     ensure!(
-      ModelPeersData::<T>::contains_key(model_id.clone(), proposal.account_id),
-      Error::<T>::ModelPeerNotExist
+      SubnetNodesData::<T>::contains_key(subnet_id.clone(), proposal.account_id),
+      Error::<T>::SubnetNodeNotExist
     );
 
     // --- Ensure voter is accountant
-    let account_model_peer = ModelPeersData::<T>::get(model_id.clone(), account_id.clone());
-    let peer_initialized: u64 = account_model_peer.initialized;
+    let account_subnet_node = SubnetNodesData::<T>::get(subnet_id.clone(), account_id.clone());
+    let peer_initialized: u64 = account_subnet_node.initialized;
     let block: u64 = Self::get_current_block_as_u64();
     let epoch_length: u64 = EpochLength::<T>::get();
-    let min_required_peer_accountant_epochs: u64 = MinRequiredPeerAccountantEpochs::<T>::get();
+    let min_required_peer_accountant_epochs: u64 = MinRequiredNodeAccountantEpochs::<T>::get();
 
     ensure!(
       Self::is_epoch_block_eligible(
@@ -276,22 +284,22 @@ impl<T: Config> Pallet<T> {
         min_required_peer_accountant_epochs, 
         peer_initialized
       ),
-      Error::<T>::PeerAccountantEpochNotReached
+      Error::<T>::NodeAccountantEpochNotReached
     );
     
-    let challenged_block: u64 = proposal.challenge_block;
+    let challenge_block: u64 = proposal.challenge_block;
 
     // --- Ensure proposal has been challenged to initiate voting
     ensure!(
-      challenged_block != 0,
+      challenge_block != 0,
       Error::<T>::ProposalNotChallenged
     );
 
-    let voting_period = DishonestyVotingPeriod::<T>::get();
+    let voting_period = VotingPeriod::<T>::get();
 
     // --- Ensure voting period hasn't passed yet
     ensure!(
-      block <= challenged_block + voting_period,
+      block <= challenge_block + voting_period,
       Error::<T>::DishonestyVotingPeriodOver
     );
 
@@ -305,7 +313,7 @@ impl<T: Config> Pallet<T> {
 
     // --- Vote on proposal
     DishonestyProposal::<T>::mutate(
-      model_id.clone(),
+      subnet_id.clone(),
       proposal_index,
       |params: &mut DishonestyProposalParams<T::AccountId>| {
         params.total_votes += 1;
@@ -324,22 +332,22 @@ impl<T: Config> Pallet<T> {
   }
 
   pub fn try_finalize_proposal(
-    model_id: u32,
+    subnet_id: u32,
     proposal_index: u32,
   ) -> DispatchResult {
     ensure!(
-      DishonestyProposal::<T>::contains_key(model_id, proposal_index),
+      DishonestyProposal::<T>::contains_key(subnet_id, proposal_index),
       Error::<T>::ProposalNotExist
     );
 
-    let proposal = DishonestyProposal::<T>::get(model_id, proposal_index);
-    let challenged_block: u64 = proposal.challenge_block;
+    let proposal = DishonestyProposal::<T>::get(subnet_id, proposal_index);
+    let challenge_block: u64 = proposal.challenge_block;
     let challenge_period = ChallengePeriod::<T>::get();
     let max_challenge_block = proposal.start_block + challenge_period;
     let block: u64 = Self::get_current_block_as_u64();
 
     // Challenge period has passed unchallenged
-    if block > max_challenge_block && challenged_block == 0 {
+    if block > max_challenge_block && challenge_block == 0 {
       // Proposal unchalleneged 
 
       // Return bid back to proposer
@@ -347,30 +355,30 @@ impl<T: Config> Pallet<T> {
       T::Currency::deposit_creating(&proposal.proposer, bid_as_balance.unwrap());
 
       // Remove dishonest peer
-      Self::do_remove_model_peer(block, model_id, proposal.account_id);
+      Self::do_remove_subnet_node(block, subnet_id, proposal.account_id);
 
       return Ok(())
     }
 
     // --- Ensure proposal has been challenged to initiate voting
     ensure!(
-      challenged_block != 0,
+      challenge_block != 0,
       Error::<T>::ProposalNotChallenged
     );
 
-    let voting_period = DishonestyVotingPeriod::<T>::get();
+    let voting_period = VotingPeriod::<T>::get();
 
     // --- Ensure voting period has passed yet
     ensure!(
-      block > challenged_block + voting_period,
+      block > challenge_block + voting_period,
       Error::<T>::DishonestyVotingPeriodNotOver
     );
 
-    let min_required_peer_accountant_epochs: u64 = MinRequiredPeerAccountantEpochs::<T>::get();
+    let min_required_peer_accountant_epochs: u64 = MinRequiredNodeAccountantEpochs::<T>::get();
     let epoch_length: u64 = EpochLength::<T>::get();
 
     let mut total_accountants = Self::get_total_accountants(
-      model_id.clone(),
+      subnet_id.clone(),
       block,
       epoch_length,
       min_required_peer_accountant_epochs
@@ -385,7 +393,7 @@ impl<T: Config> Pallet<T> {
     }
 
     // --- Check if proposal has reached quorum
-    let quorum: u128 = DishonestyProposalQuorum::<T>::get();
+    let quorum: u128 = ProposalQuorum::<T>::get();
     let percent_voting: u128 = Self::percent_div(proposal.total_votes as u128, total_accountants as u128);
 
     ensure!(
@@ -393,7 +401,7 @@ impl<T: Config> Pallet<T> {
       Error::<T>::QuorumNotReached
     );
 
-    let consensus_threshold: u128 = DishonestyProposalConsensusThreshold::<T>::get();
+    let consensus_threshold: u128 = ProposalConsensusThreshold::<T>::get();
 
     let yay_votes = proposal.votes.yay;
     let yay_votes_percentage: u128 = Self::percent_div(yay_votes as u128, proposal.total_votes as u128);
@@ -411,14 +419,14 @@ impl<T: Config> Pallet<T> {
       // Consensus reached
       
       // Remove dishonest peer
-      Self::do_remove_model_peer(block, model_id, proposal.account_id);
+      Self::do_remove_subnet_node(block, subnet_id, proposal.account_id);
 
       // Give proposer bid back
       T::Currency::deposit_creating(&proposal.proposer, bid_as_balance.unwrap());
       
       // Distribute challenger bid to all in consensus
       Self::distributed_proposal_bids(
-      	model_id.clone(),
+      	subnet_id.clone(),
         proposal.proposer,
       	proposal.bid,
       	proposal.yay_voters
@@ -433,7 +441,7 @@ impl<T: Config> Pallet<T> {
 
       // Distribute proposer bid to all in consensus
       Self::distributed_proposal_bids(
-      	model_id.clone(),
+      	subnet_id.clone(),
         proposal.account_id,
       	proposal.bid,
       	proposal.nay_voters
@@ -451,16 +459,16 @@ impl<T: Config> Pallet<T> {
 
   pub fn try_cancel_proposal(
     account_id: T::AccountId, 
-    model_id: u32,
+    subnet_id: u32,
     proposal_index: u32,
   ) -> DispatchResult {
     ensure!(
-      DishonestyProposal::<T>::contains_key(model_id, proposal_index),
+      DishonestyProposal::<T>::contains_key(subnet_id, proposal_index),
       Error::<T>::ProposalNotExist
     );
 
     // Get proposal and remove it from storage
-    let proposal = DishonestyProposal::<T>::take(model_id, proposal_index);
+    let proposal = DishonestyProposal::<T>::take(subnet_id, proposal_index);
 
     // --- Ensure proposal hasn't been challenged yet
     ensure!(
@@ -493,16 +501,16 @@ impl<T: Config> Pallet<T> {
   }
 
   pub fn account_has_active_proposal(
-    model_id: u32, 
+    subnet_id: u32, 
     account_id: T::AccountId, 
     proposal_type: PropsType,
     block: u64,
   ) -> bool {
     let challenge_period = ChallengePeriod::<T>::get();
-    let dishonesty_voting_period = DishonestyVotingPeriod::<T>::get();
+    let dishonesty_voting_period = VotingPeriod::<T>::get();
 
     let mut active_proposal: bool = false;
-    for proposal in DishonestyProposal::<T>::iter_prefix_values(model_id) {
+    for proposal in DishonestyProposal::<T>::iter_prefix_values(subnet_id) {
       let proposal_account_id: T::AccountId = proposal.account_id;
       if proposal_account_id != account_id {
         continue;
@@ -538,7 +546,7 @@ impl<T: Config> Pallet<T> {
   }
 
   pub fn distributed_proposal_bids(
-    model_id: u32, 
+    subnet_id: u32, 
     winner: T::AccountId,
     bid: u128, 
     voters: Vec<T::AccountId>
